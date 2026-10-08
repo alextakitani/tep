@@ -52,6 +52,10 @@ class TestResponse < TepTest
     get '/halt-bare' do
       halt 418
     end
+
+    get '/utf8' do
+      "héllo wörld — ü"
+    end
   RB
 
   def test_default_200
@@ -119,5 +123,21 @@ class TestResponse < TepTest
   def test_content_length
     res = get("/ok")
     assert_equal "2", res["content-length"]
+  end
+
+  def test_multibyte_content_length_counts_bytes
+    res = get("/utf8")
+    assert_equal "héllo wörld — ü", res.body.force_encoding("UTF-8")
+    assert_equal "héllo wörld — ü".bytesize.to_s, res["content-length"]
+  end
+
+  def test_multibyte_body_keeps_keepalive_stream_in_sync
+    Net::HTTP.start("127.0.0.1", @port, read_timeout: 3) do |http|
+      r1 = http.get("/utf8")
+      r2 = http.get("/ok")
+      assert_equal "200", r1.code
+      assert_equal "200", r2.code
+      assert_equal "ok", r2.body
+    end
   end
 end

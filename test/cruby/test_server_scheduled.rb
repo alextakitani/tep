@@ -22,6 +22,10 @@ class TestServerScheduled < TepTest
     post "/upper" do
       request.body.upcase
     end
+
+    get "/utf8" do
+      "héllo wörld — ü"
+    end
   RB
 
   def test_basic_get_through_scheduler
@@ -52,5 +56,25 @@ class TestServerScheduled < TepTest
     assert_equal "200", r2.code
     assert_equal "pong", r1.body
     assert_equal "two", r2.body
+  end
+
+  def test_multibyte_body_content_length_counts_bytes
+    res = get("/utf8")
+    assert_equal "200", res.code
+    assert_equal "héllo wörld — ü", res.body.force_encoding("UTF-8")
+    assert_equal "héllo wörld — ü".bytesize.to_s, res["content-length"]
+  end
+
+  def test_multibyte_body_keeps_keepalive_stream_in_sync
+    # One persistent connection, a multibyte body first. If Content-Length
+    # is counted in characters the body's trailing bytes spill into the
+    # next response's status line and the client sees a corrupt stream.
+    Net::HTTP.start("127.0.0.1", @port, read_timeout: 3) do |http|
+      r1 = http.get("/utf8")
+      r2 = http.get("/ping")
+      assert_equal "200", r1.code
+      assert_equal "200", r2.code
+      assert_equal "pong", r2.body
+    end
   end
 end
