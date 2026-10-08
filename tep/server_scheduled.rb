@@ -208,7 +208,11 @@ module Tep
           # keep-alive loop to end after this response so the stream's
           # terminator isn't followed by a stale read on the same fd.
           keep_alive = req.keep_alive? && !res.halted_close? && !res.streaming
-          Tep::Server::Scheduled.write_response(client, req, res, keep_alive)
+          if Tep::Server::Scheduled.write_response(client, req, res, keep_alive) < 0
+            # Partial response on the wire (peer gone or stopped
+            # reading): the stream is unusable for another request.
+            break
+          end
           keep_going = keep_alive
         end
         Sock.sphttp_close(client)
@@ -253,9 +257,39 @@ module Tep
         ""
       end
 
+      # Write all of `data` to the (non-blocking) client fd, parking
+      # the connection fiber on io_wait whenever the socket would
+      # block. A response larger than the socket buffer, or a client
+      # that reads slowly, used to hit EAGAIN inside sphttp_write_str
+      # and lose the rest of the response. Returns 0 on success, -1 on
+      # a hard error or a write-side stall longer than KEEPALIVE_TIMEOUT.
+      def self.write_all(client, data)
+        offset = 0
+        total = data.bytesize
+        while offset < total
+          written = Sock.sphttp_write_some(client, data, offset)
+          if written < 0
+            return -1
+          end
+          if written > 0
+            offset += written
+          else
+            mode = Tep::Scheduler::WRITE
+            if Sock.sphttp_io_status == 1
+              mode = Tep::Scheduler::READ
+            end
+            if Tep::Scheduler.io_wait(client, mode, KEEPALIVE_TIMEOUT) == 0
+              return -1
+            end
+          end
+        end
+        0
+      end
+
       # Body-shape mirror of Tep::Server#write_response. Lifted into
       # a cmeth so the connection fiber can call it without a captured
-      # `self`.
+      # `self`. Returns 0, or -1 when the response could not be
+      # written in full (the caller must close the connection).
       def self.write_response(client, req, res, keep_alive)
         # WebSocket upgrade branch. Set by res.start_websocket in the
         # user's handler after a successful Handshake.check. Writes
@@ -267,7 +301,9 @@ module Tep
         if res.upgrading_ws
           head = Tep::WebSocket::Handshake.build_response(
             res.ws_accept_key, res.ws_driver.subprotocol)
-          Sock.sphttp_write_str(client, head)
+          if Tep::Server::Scheduled.write_all(client, head) < 0
+            return -1
+          end
           res.ws_driver.set_fd(client)
           conn = Tep::WebSocket::Connection.new(res.ws_driver)
           conn.run
@@ -298,7 +334,9 @@ module Tep
             head = head + "Set-Cookie: " + line + "\r\n"
           end
           head = head + "Connection: close\r\n\r\n"
-          Sock.sphttp_write_str(client, head)
+          if Tep::Server::Scheduled.write_all(client, head) < 0
+            return -1
+          end
           out = Tep::Stream.new(client)
           res.streamer.pump(out)
           Sock.sphttp_write_chunk_end(client)
@@ -353,15 +391,21 @@ module Tep
         if res.file_path.length > 0
           fs = Sock.sphttp_filesize(res.file_path)
           head = head + "Content-Length: " + fs.to_s + "\r\n\r\n"
-          Sock.sphttp_write_str(client, head)
+          if Tep::Server::Scheduled.write_all(client, head) < 0
+            return -1
+          end
           if !res.head_only
             Sock.sphttp_sendfile(client, res.file_path)
           end
         else
           head = head + "Content-Length: " + res.body.length.to_s + "\r\n\r\n"
-          Sock.sphttp_write_str(client, head)
+          if Tep::Server::Scheduled.write_all(client, head) < 0
+            return -1
+          end
           if res.body.length > 0 && !res.head_only
-            Sock.sphttp_write_str(client, res.body)
+            if Tep::Server::Scheduled.write_all(client, res.body) < 0
+              return -1
+            end
           end
         end
         0
@@ -372,7 +416,7 @@ module Tep
         head = "HTTP/1.0 " + status.to_s + " " + reason + "\r\n" +
                "Content-Length: " + msg.length.to_s + "\r\n" +
                "Connection: close\r\n\r\n" + msg
-        Sock.sphttp_write_str(client, head)
+        Tep::Server::Scheduled.write_all(client, head)
         0
       end
     end
