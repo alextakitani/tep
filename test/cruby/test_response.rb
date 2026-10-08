@@ -56,6 +56,10 @@ class TestResponse < TepTest
     get '/utf8' do
       "héllo wörld — ü"
     end
+
+    post '/echo_body' do
+      request.body
+    end
   RB
 
   def test_default_200
@@ -129,6 +133,13 @@ class TestResponse < TepTest
     res = get("/utf8")
     assert_equal "héllo wörld — ü", res.body.force_encoding("UTF-8")
     assert_equal "héllo wörld — ü".bytesize.to_s, res["content-length"]
+  end
+
+  def test_multibyte_request_body_is_read_in_full_without_stalling
+    body = "héllo wörld — ü"
+    res = post("/echo_body", body, { "Content-Type" => "text/plain" })
+    assert_equal "200", res.code
+    assert_equal body, res.body.force_encoding("UTF-8")
   end
 
   def test_multibyte_body_keeps_keepalive_stream_in_sync

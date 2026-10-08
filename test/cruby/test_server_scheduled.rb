@@ -26,6 +26,10 @@ class TestServerScheduled < TepTest
     get "/utf8" do
       "héllo wörld — ü"
     end
+
+    post "/echo_body" do
+      request.body
+    end
   RB
 
   def test_basic_get_through_scheduler
@@ -63,6 +67,16 @@ class TestServerScheduled < TepTest
     assert_equal "200", res.code
     assert_equal "héllo wörld — ü", res.body.force_encoding("UTF-8")
     assert_equal "héllo wörld — ü".bytesize.to_s, res["content-length"]
+  end
+
+  def test_multibyte_request_body_is_read_in_full_without_stalling
+    # The client's Content-Length is in bytes; counting the body in
+    # characters made the server wait for bytes that never come (5s
+    # io_wait timeout) before answering.
+    body = "héllo wörld — ü"
+    res = post("/echo_body", body, { "Content-Type" => "text/plain" })
+    assert_equal "200", res.code
+    assert_equal body, res.body.force_encoding("UTF-8")
   end
 
   def test_multibyte_body_keeps_keepalive_stream_in_sync
